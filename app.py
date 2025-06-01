@@ -122,6 +122,9 @@ if "vibe_seed" not in st.session_state:
 if "followup_count" not in st.session_state:
     st.session_state.followup_count = 0
 
+if "debug_logs" not in st.session_state:
+    st.session_state.debug_logs = []
+
 # --------------------------
 # Display Chat History
 # --------------------------
@@ -174,27 +177,14 @@ if prompt := st.chat_input(placeholder):
             if parsed_json:
                 st.session_state.conversation_json = parsed_json
 
-                # Debug: Display raw and parsed JSON response
-                debug_content = f"**Agent Response:**\n``````\n\n"
-                # debug_content += f"**Debug - Parsed JSON:**\n``````\n\n"
-                # debug_content += f"**Debug - Follow-up Count:** {st.session_state.followup_count}\n\n"
-
-                # Show current conversation state
-                # debug_content += f"**Debug - Current Conversation State:**\n``````"
-                
-                # st.markdown(debug_content)
-                # print the parsed_json as proper json response
-                # debug_content += json.dumps(parsed_json, indent=2)
-                # st.markdown(debug_content + "``````")
-                # st.markdown("**Debug - Parsed JSON:**")
-                # st.json(parsed_json, expanded=True)
-
-                # Debug content
                 debug_content = f"**Json formed:**\n```"
                 debug_content += "{\n"
                 debug_content += json.dumps(parsed_json, indent=2)
-                debug_content += "\n```"
-                st.markdown(debug_content)
+                debug_content += "\n"
+                # Instead of printing in chat, show in a debug console expander
+                if "debug_logs" not in st.session_state:
+                    st.session_state.debug_logs = []
+                st.session_state.debug_logs.append(debug_content)
 
                 # Prepare assistant response content
                 assistant_content = ""
@@ -263,3 +253,7 @@ Write a friendly, concise summary (2-4 sentences) explaining why these products 
                     "content": error_msg,
                     "dataframe": None
                 })
+
+with st.sidebar.expander("Debug Console", expanded=True):
+    for log in st.session_state.debug_logs[-10:]:
+        st.markdown(log)

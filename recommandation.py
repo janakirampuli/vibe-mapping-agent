@@ -27,6 +27,27 @@ class ProductRecommender:
         else:
             print("Building new embeddings (this will take a moment)...")
             self._build_and_save_embeddings()
+
+    def _load_embeddings(self):
+        """Load embeddings and related data from disk."""
+        try:
+            # Load embeddings
+            self.product_embeddings = np.load(self.embeddings_dir / 'product_embeddings.npy')
+            
+            # Load FAISS index
+            self.index = faiss.read_index(str(self.embeddings_dir / 'faiss_index.bin'))
+            
+            # Load descriptions (and add to DataFrame if not present)
+            with open(self.embeddings_dir / 'descriptions.pkl', 'rb') as f:
+                descriptions = pickle.load(f)
+            
+            if 'description' not in self.df.columns:
+                self.df['description'] = descriptions
+                
+        except Exception as e:
+            print(f"Error loading embeddings: {e}")
+            # If loading fails, rebuild embeddings
+            self._build_and_save_embeddings()
     
     def _create_df_hash(self):
         """Create a hash of the DataFrame content to detect changes."""
@@ -66,54 +87,62 @@ class ProductRecommender:
             raise FileNotFoundError(f"Excel file not found: {file_path}")
         return pd.read_excel(file_path)
     
-    def _describe_product(self, row):
-        """Create a clean, natural-language description of a product from its attributes (excluding price)."""
-        parts = []
-        attr_labels = [
-            ('name', 'Name'),
-            ('category', 'Category'),
-            ('fit', 'Fit'),
-            ('fabric', 'Fabric'),
-            ('available_sizes', 'Available Sizes'), 
-            ('sleeve_length', 'Sleeve Length'),
-            ('color_or_print', 'Color/Print'),
-            ('occasion', 'Occasion'),
-            ('neckline', 'Neckline'),
-            ('length', 'Length'),
-            ('pant_type', 'Pant Type')
+    def _describe_product(self, attrs):
+        """Create a value-only description of a product/query from its attributes (excluding price and labels), matching the notebook logic."""
+        attr_order = [
+            'category',
+            'size',
+            'fit',
+            'fabric',
+            'sleeve_length',
+            'color_or_print',
+            'occasion',
+            'neckline',
+            'length',
+            'pant_type'
         ]
-        for attr, label in attr_labels:
-            value = row.get(attr)
+        parts = []
+        for attr in attr_order:
+            value = attrs.get(attr)
             if pd.notna(value) and value is not None and str(value).strip():
                 if isinstance(value, list):
                     value_str = ', '.join(str(v) for v in value if v is not None and str(v).strip())
                 else:
                     value_str = str(value).strip()
-                parts.append(f"{label}: {value_str}")
+                parts.append(value_str)
         return ". ".join(parts)
 
+    def _row_to_attr_dict(self, row):
+        """Convert a product row (Series) to a dict with the same keys/order as used in the notebook embedding."""
+        return {
+            'category': row.get('category'),
+            'size': row.get('available_sizes'),
+            'fit': row.get('fit'),
+            'fabric': row.get('fabric'),
+            'sleeve_length': row.get('sleeve_length'),
+            'color_or_print': row.get('color_or_print'),
+            'occasion': row.get('occasion'),
+            'neckline': row.get('neckline'),
+            'length': row.get('length'),
+            'pant_type': row.get('pant_type')
+        }
+
     def _build_and_save_embeddings(self):
-        """Build embeddings and save them to disk."""
-        # Generate descriptions for all products
+        """Build embeddings and save them to disk, using consistent description logic for all products."""
         print("Generating product descriptions...")
-        self.df['description'] = self.df.apply(self._describe_product, axis=1)
+        # Use consistent dict conversion for each row
+        self.df['description'] = self.df.apply(lambda row: self._describe_product(self._row_to_attr_dict(row)), axis=1)
         descriptions = self.df['description'].tolist()
-        
-        # Create embeddings
         print("Encoding product descriptions...")
         self.product_embeddings = self.model.encode(
             descriptions, 
             normalize_embeddings=True,
             show_progress_bar=True
         )
-        
-        # Build FAISS index
         print("Building FAISS index...")
         d = self.product_embeddings.shape[1]
         self.index = faiss.IndexFlatL2(d)
         self.index.add(self.product_embeddings.astype('float32'))
-        
-        # Save everything
         self._save_embeddings()
         print(f"Embeddings saved to {self.embeddings_dir}")
     
@@ -145,50 +174,22 @@ class ProductRecommender:
             print(f"Error saving embeddings: {e}")
             raise
     
-    def _load_embeddings(self):
-        """Load embeddings and related data from disk."""
-        try:
-            # Load embeddings
-            self.product_embeddings = np.load(self.embeddings_dir / 'product_embeddings.npy')
-            
-            # Load FAISS index
-            self.index = faiss.read_index(str(self.embeddings_dir / 'faiss_index.bin'))
-            
-            # Load descriptions (and add to DataFrame if not present)
-            with open(self.embeddings_dir / 'descriptions.pkl', 'rb') as f:
-                descriptions = pickle.load(f)
-            
-            if 'description' not in self.df.columns:
-                self.df['description'] = descriptions
-                
-        except Exception as e:
-            print(f"Error loading embeddings: {e}")
-            # If loading fails, rebuild embeddings
-            self._build_and_save_embeddings()
-    
+
     def _query_to_description(self, structured_attrs):
-        """Convert structured attributes to a text description for embedding (excluding price)."""
-        def format_value(value):
-            if isinstance(value, list):
-                return [str(v).strip() for v in value if v is not None and str(v).strip()]
-            if value is not None and str(value).strip():
-                return str(value).strip()
-            return None
-        query_row = {
-            'name': None,
-            'category': format_value(structured_attrs.get('category')),
-            'fit': format_value(structured_attrs.get('fit')),
-            'fabric': format_value(structured_attrs.get('fabric')),
-            'available_sizes': format_value(structured_attrs.get('size')),
-            'sleeve_length': format_value(structured_attrs.get('sleeve_length')),
-            'color_or_print': format_value(structured_attrs.get('color_or_print')),
-            'occasion': format_value(structured_attrs.get('occasion')),
-            'neckline': format_value(structured_attrs.get('neckline')),
-            'length': format_value(structured_attrs.get('length')),
-            'pant_type': format_value(structured_attrs.get('pant_type'))
-            # price intentionally excluded
+        """Convert structured attributes to a text description for embedding (excluding price), using the same logic/order as products and the notebook."""
+        attrs = {
+            'category': structured_attrs.get('category'),
+            'size': structured_attrs.get('size'),
+            'fit': structured_attrs.get('fit'),
+            'fabric': structured_attrs.get('fabric'),
+            'sleeve_length': structured_attrs.get('sleeve_length'),
+            'color_or_print': structured_attrs.get('color_or_print'),
+            'occasion': structured_attrs.get('occasion'),
+            'neckline': structured_attrs.get('neckline'),
+            'length': structured_attrs.get('length'),
+            'pant_type': structured_attrs.get('pant_type')
         }
-        return self._describe_product(query_row)
+        return self._describe_product(attrs)
     
     def recommend_products(self, structured_attrs, k=10, final_k=3):
         """
@@ -220,137 +221,154 @@ class ProductRecommender:
             return self.df.sample(min(final_k, len(self.df)))
 
     def _apply_hybrid_scoring(self, candidates, structured_attrs, final_k):
+
+        print("Candidates:",  candidates)
+        print("structured: ", structured_attrs)
+        print("====================== APPLYING HYBRID SCORING ============")
         """
-        Apply improved rules and scoring to select final recommendations from candidates.
-        Includes partial/fuzzy matching for color, fabric, etc.
+        Apply strict filters (category, size, price, pant_type) and soft scoring for other fields.
         """
         import difflib
         scored_candidates = candidates.copy()
-        scored_candidates['price_score'] = 0.0
-        scored_candidates['size_score'] = 0.0
-        scored_candidates['occasion_score'] = 0.0
-        scored_candidates['color_score'] = 0.0
-        scored_candidates['category_score'] = 0.0
-        scored_candidates['fabric_score'] = 0.0
-        # Rule 1: Price Matching (25% weight)
-        query_price = structured_attrs.get('price_max') or structured_attrs.get('price')
-        if query_price is not None and 'price' in scored_candidates.columns:
-            try:
-                query_price = float(query_price)
-                scored_candidates['price'] = pd.to_numeric(scored_candidates['price'], errors='coerce')
-                def calculate_price_score(price):
-                    if pd.isna(price):
-                        return 0.0
-                    price_diff = abs(float(price) - query_price)
-                    max_diff = query_price * 0.5
-                    return max(0, 1 - (price_diff / max_diff)) if max_diff > 0 else 1.0
-                scored_candidates['price_score'] = scored_candidates['price'].apply(calculate_price_score)
-            except Exception as e:
-                print(f"Error in price scoring: {e}")
-        # Rule 2: Size Matching (20% weight, partial match allowed)
-        query_sizes = structured_attrs.get('size')
-        if query_sizes and 'available_sizes' in scored_candidates.columns:
-            if isinstance(query_sizes, str):
-                query_sizes = [query_sizes]
-            def calculate_size_score(available_sizes):
-                if pd.isna(available_sizes):
-                    return 0.0
-                available = str(available_sizes).lower().split(',')
-                available = [s.strip() for s in available]
-                for query_size in query_sizes:
-                    if any(query_size.lower() in avail for avail in available):
-                        return 1.0
-                return 0.0
-            scored_candidates['size_score'] = scored_candidates['available_sizes'].apply(calculate_size_score)
-        # Rule 3: Occasion Matching (10% weight, partial match)
-        query_occasion = structured_attrs.get('occasion')
-        if query_occasion and 'occasion' in scored_candidates.columns:
-            def calculate_occasion_score(occasion):
-                if pd.isna(occasion):
-                    return 0.0
-                return 1.0 if query_occasion.lower() in str(occasion).lower() else 0.0
-            scored_candidates['occasion_score'] = scored_candidates['occasion'].apply(calculate_occasion_score)
-        # Rule 4: Color/Print Matching (10% weight, fuzzy match)
-        query_color = structured_attrs.get('color_or_print')
-        if query_color and 'color_or_print' in scored_candidates.columns:
-            def calculate_color_score(color):
-                if pd.isna(color):
-                    return 0.0
-                # Fuzzy match using difflib
-                color_str = str(color).lower()
-                query_str = str(query_color).lower()
-                if query_str in color_str:
-                    return 1.0
-                # Fuzzy ratio
-                ratio = difflib.SequenceMatcher(None, query_str, color_str).ratio()
-                return ratio if ratio > 0.5 else 0.0
-            scored_candidates['color_score'] = scored_candidates['color_or_print'].apply(calculate_color_score)
-        # Rule 5: Category Exact/Partial Match (10% weight)
+        # --- STRICT FILTERS ---
+        # 1. Category (must match if specified)
         query_category = structured_attrs.get('category')
         if query_category and 'category' in scored_candidates.columns:
             if isinstance(query_category, list):
                 query_category = query_category[0] if query_category else None
             if query_category:
-                def calculate_category_score(category):
-                    if pd.isna(category):
-                        return 0.0
-                    cat_str = str(category).lower()
-                    query_str = str(query_category).lower()
-                    if query_str == cat_str:
-                        return 1.0
-                    if query_str in cat_str or cat_str in query_str:
-                        return 0.7
-                    return 0.0
-                scored_candidates['category_score'] = scored_candidates['category'].apply(calculate_category_score)
-        # Rule 6: Fabric Preference (10% weight, fuzzy/partial)
+                scored_candidates = scored_candidates[
+                    scored_candidates['category'].str.lower() == str(query_category).lower()
+                ]
+                if len(scored_candidates) == 0:
+                    print("No products match category, relaxing filter")
+                    scored_candidates = candidates.copy()
+        # 2. Size (must match if specified)
+        query_sizes = structured_attrs.get('size')
+        if query_sizes and 'available_sizes' in scored_candidates.columns:
+            if isinstance(query_sizes, str):
+                query_sizes = [query_sizes]
+            def size_match(available_sizes):
+                if pd.isna(available_sizes):
+                    return False
+                available = str(available_sizes).lower().split(',')
+                available = [s.strip() for s in available]
+                for query_size in query_sizes:
+                    if any(query_size.lower() in avail for avail in available):
+                        return True
+                return False
+            scored_candidates = scored_candidates[scored_candidates['available_sizes'].apply(size_match)]
+            if len(scored_candidates) == 0:
+                print("No products match size requirement, relaxing filter")
+                scored_candidates = candidates.copy()
+        # 3. Price (must be within budget if specified)
+        query_price = structured_attrs.get('price_max') or structured_attrs.get('price')
+        if query_price and 'price' in scored_candidates.columns:
+            try:
+                query_price = float(query_price)
+                scored_candidates['price'] = pd.to_numeric(scored_candidates['price'], errors='coerce')
+                max_budget = query_price * 1.2
+                scored_candidates = scored_candidates[(pd.isna(scored_candidates['price'])) | (scored_candidates['price'] <= max_budget)]
+                if len(scored_candidates) == 0:
+                    print("No products within budget, relaxing price filter")
+                    scored_candidates = candidates.copy()
+            except Exception as e:
+                print(f"Error in price filtering: {e}")
+        # 4. Pant Type (if category is pants and pant_type specified)
+        query_pant_type = structured_attrs.get('pant_type')
+        if query_pant_type and 'pant_type' in scored_candidates.columns and query_category and 'pant' in str(query_category).lower():
+            if isinstance(query_pant_type, list):
+                query_pant_type = query_pant_type[0] if query_pant_type else None
+            if query_pant_type:
+                scored_candidates = scored_candidates[
+                    scored_candidates['pant_type'].str.lower() == str(query_pant_type).lower()
+                ]
+                if len(scored_candidates) == 0:
+                    print("No products match pant type, relaxing filter")
+                    scored_candidates = candidates.copy()
+        # --- SOFT SCORING ---
+        # Initialize all scores to 0
+        for col in ['fit', 'fabric', 'color_or_print', 'occasion', 'sleeve_length', 'neckline', 'length']:
+            scored_candidates[f'{col}_score'] = 0.0
+        # Fit
+        query_fit = structured_attrs.get('fit')
+        if query_fit and 'fit' in scored_candidates.columns:
+            def fit_score(fit):
+                if pd.isna(fit): return 0.0
+                return 1.0 if str(query_fit).lower() in str(fit).lower() else 0.0
+            scored_candidates['fit_score'] = scored_candidates['fit'].apply(fit_score)
+        # Fabric (fuzzy)
         query_fabric = structured_attrs.get('fabric')
         if query_fabric and 'fabric' in scored_candidates.columns:
             if isinstance(query_fabric, list):
                 query_fabric = query_fabric[0] if query_fabric else None
             if query_fabric:
-                def calculate_fabric_score(fabric):
-                    if pd.isna(fabric):
-                        return 0.0
+                def fabric_score(fabric):
+                    if pd.isna(fabric): return 0.0
                     fabric_str = str(fabric).lower()
                     query_str = str(query_fabric).lower()
                     if query_str in fabric_str:
                         return 1.0
                     ratio = difflib.SequenceMatcher(None, query_str, fabric_str).ratio()
                     return ratio if ratio > 0.5 else 0.0
-                scored_candidates['fabric_score'] = scored_candidates['fabric'].apply(calculate_fabric_score)
-        # Calculate weighted final score
+                scored_candidates['fabric_score'] = scored_candidates['fabric'].apply(fabric_score)
+        # Color/Print (fuzzy)
+        query_color = structured_attrs.get('color_or_print')
+        if query_color and 'color_or_print' in scored_candidates.columns:
+            def color_score(color):
+                if pd.isna(color): return 0.0
+                color_str = str(color).lower()
+                query_str = str(query_color).lower()
+                if query_str in color_str:
+                    return 1.0
+                ratio = difflib.SequenceMatcher(None, query_str, color_str).ratio()
+                return ratio if ratio > 0.5 else 0.0
+            scored_candidates['color_or_print_score'] = scored_candidates['color_or_print'].apply(color_score)
+        # Occasion
+        query_occasion = structured_attrs.get('occasion')
+        if query_occasion and 'occasion' in scored_candidates.columns:
+            def occasion_score(occasion):
+                if pd.isna(occasion): return 0.0
+                return 1.0 if str(query_occasion).lower() in str(occasion).lower() else 0.0
+            scored_candidates['occasion_score'] = scored_candidates['occasion'].apply(occasion_score)
+        # Sleeve Length
+        query_sleeve = structured_attrs.get('sleeve_length')
+        if query_sleeve and 'sleeve_length' in scored_candidates.columns:
+            def sleeve_score(sleeve):
+                if pd.isna(sleeve): return 0.0
+                return 1.0 if str(query_sleeve).lower() in str(sleeve).lower() else 0.0
+            scored_candidates['sleeve_length_score'] = scored_candidates['sleeve_length'].apply(sleeve_score)
+        # Neckline
+        query_neckline = structured_attrs.get('neckline')
+        if query_neckline and 'neckline' in scored_candidates.columns:
+            def neckline_score(neck):
+                if pd.isna(neck): return 0.0
+                return 1.0 if str(query_neckline).lower() in str(neck).lower() else 0.0
+            scored_candidates['neckline_score'] = scored_candidates['neckline'].apply(neckline_score)
+        # Length
+        query_length = structured_attrs.get('length')
+        if query_length and 'length' in scored_candidates.columns:
+            def length_score(length):
+                if pd.isna(length): return 0.0
+                return 1.0 if str(query_length).lower() in str(length).lower() else 0.0
+            scored_candidates['length_score'] = scored_candidates['length'].apply(length_score)
+        # --- Final Score ---
         weights = {
             'similarity_score': 0.25,  # 25% semantic similarity
-            'price_score': 0.25,      # 25% price matching
-            'size_score': 0.2,        # 20% size availability
-            'occasion_score': 0.1,    # 10% occasion matching
-            'color_score': 0.1,       # 10% color matching
-            'category_score': 0.05,   # 5% category match
-            'fabric_score': 0.05      # 5% fabric preference
+            'fit_score': 0.15,
+            'fabric_score': 0.15,
+            'color_or_print_score': 0.1,
+            'occasion_score': 0.1,
+            'sleeve_length_score': 0.08,
+            'neckline_score': 0.07,
+            'length_score': 0.05
         }
         scored_candidates['hybrid_score'] = 0.0
         for score_type, weight in weights.items():
             if score_type in scored_candidates.columns:
                 scored_candidates['hybrid_score'] += scored_candidates[score_type] * weight
-        # Apply strict filters (must-have requirements)
-        filtered_candidates = scored_candidates.copy()
-        # Strict Filter 1: Size availability (if specified)
-        query_sizes = structured_attrs.get('size')
-        if query_sizes:
-            filtered_candidates = filtered_candidates[filtered_candidates['size_score'] > 0]
-            if len(filtered_candidates) == 0:
-                filtered_candidates = scored_candidates.copy()
-        # Strict Filter 2: Price range (if specified with max budget)
-        if query_price and 'price' in filtered_candidates.columns:
-            max_budget = query_price * 1.2
-            filtered_candidates = filtered_candidates[
-                (pd.isna(filtered_candidates['price'])) |
-                (filtered_candidates['price'] <= max_budget)
-            ]
-            if len(filtered_candidates) == 0:
-                filtered_candidates = scored_candidates.copy()
         # Sort by hybrid score and return top final_k
-        final_recommendations = filtered_candidates.sort_values(
+        final_recommendations = scored_candidates.sort_values(
             ['hybrid_score', 'similarity_score'],
             ascending=[False, False]
         ).head(final_k)
@@ -363,6 +381,11 @@ class ProductRecommender:
             'fabric': 'Fabric',
             'available_sizes': 'Available Sizes',
             'occasion': 'Occasion',
+            'fit': 'Fit',
+            'sleeve_length': 'Sleeve Length',
+            'neckline': 'Neckline',
+            'length': 'Length',
+            'pant_type': 'Pant Type',
             'hybrid_score': 'Match Score'
         }
         clean_recommendations = final_recommendations.copy()
@@ -378,12 +401,7 @@ class ProductRecommender:
             display_df['Match Score'] = display_df['Match Score'].apply(
                 lambda x: f"{x:.1%}" if pd.notna(x) else "0%"
             )
-        # Add ranking
         display_df.insert(0, 'Rank', range(1, len(display_df) + 1))
-        # Add Final Score as a percentage (hybrid_score)
-        if 'Match Score' in display_df.columns:
-            display_df['Final Score'] = display_df['Match Score']
-        # Clean up any NaN values for display
         display_df = display_df.fillna("Not specified")
         print(f"Selected {len(display_df)} products for display")
         return display_df
