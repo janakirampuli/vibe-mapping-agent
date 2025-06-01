@@ -123,7 +123,7 @@ if "followup_count" not in st.session_state:
     st.session_state.followup_count = 0
 
 if "debug_logs" not in st.session_state:
-    st.session_state.debug_logs = []
+    st.session_state.debug_logs = ["Debug console"]
 
 # --------------------------
 # Display Chat History

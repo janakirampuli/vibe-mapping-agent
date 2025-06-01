@@ -94,3 +94,11 @@ The Vibe Mapping Agent is an interactive, AI-driven fashion recommendation syste
 - **Streamlit:** Provides the web interface and handles user interactions.
 - **Recommendation Logic:** Combines strict filtering first (category, size, price, pant type) with soft scoring for other attributes (fit, fabric, color, ... etc).
 
+---
+
+Sample examples images:
+
+![Example](img-1.png)
+![](img-2.png)
+---
+
